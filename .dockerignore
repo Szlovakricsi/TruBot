@@ -1,0 +1,15 @@
+.git
+.github
+__pycache__/
+*.py[cod]
+*.log
+*.zip
+*.env
+.env*
+config.yaml
+config-*.yaml
+state.json
+data/
+.deps/
+venv/
+.venv/

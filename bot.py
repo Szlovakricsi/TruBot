@@ -628,13 +628,22 @@ def app_update_alert_is_suppressed(application: Application, alert: dict) -> boo
     return time.monotonic() < until
 
 
-def alert_button(uuid_value: str) -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup([[
-        InlineKeyboardButton(
+def alert_button(
+    uuid_value: str, is_app_update: bool = False
+) -> InlineKeyboardMarkup | None:
+    """Show update and acknowledgement independently on app update alerts."""
+    buttons = []
+    if uuid_value:
+        buttons.append(InlineKeyboardButton(
             "✅ Nyugtázás",
             callback_data=f"alert:dismiss:{uuid_value}",
-        )
-    ]])
+        ))
+    if is_app_update and ALLOW_APP_UPDATES:
+        buttons.append(InlineKeyboardButton(
+            "⬆️ Frissítés",
+            callback_data="alert:updates",
+        ))
+    return InlineKeyboardMarkup([buttons]) if buttons else None
 
 
 async def send_alert(application: Application, alert: dict) -> None:
@@ -654,7 +663,7 @@ async def send_alert(application: Application, alert: dict) -> None:
         f"{text}"
     )
 
-    markup = alert_button(uuid_value) if uuid_value else None
+    markup = alert_button(uuid_value, is_app_update_available_alert(alert))
     for chat_id in ALLOWED_CHAT_IDS:
         try:
             await application.bot.send_message(
@@ -901,7 +910,7 @@ async def cmd_alerts(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
             uuid_value = str(alert.get("uuid", ""))
             await update.effective_message.reply_text(
                 f"{ALERT_ICONS.get(level, '•')} {level}\n\n{text}"[:4000],
-                reply_markup=alert_button(uuid_value) if uuid_value else None,
+                reply_markup=alert_button(uuid_value, is_app_update_available_alert(alert)),
             )
 
         if len(active) > 20:
@@ -924,6 +933,15 @@ async def callback_alert(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         return
 
     data = query.data or ""
+    if data == "alert:updates":
+        if not ALLOW_APP_UPDATES:
+            await query.answer("Az alkalmazásfrissítés le van tiltva.", show_alert=True)
+            return
+        # Keep the original alert (and its acknowledgement button) intact.
+        # A new message presents update choices and requires confirmation.
+        await show_update_options(query.message, context.application)
+        return
+
     if not data.startswith("alert:dismiss:"):
         return
 
@@ -1061,23 +1079,15 @@ def render_update_progress(
     return result
 
 
-async def cmd_updates(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if not await require_allowed(update):
-        return
-
-    if not ALLOW_APP_UPDATES:
-        await update.effective_message.reply_text(
-            "❌ Az appfrissítés le van tiltva."
-        )
-        return
-
-    msg = await update.effective_message.reply_text("Frissítések keresése…")
+async def show_update_options(message: Any, application: Application) -> None:
+    """Open the regular one/all app update flow from a command or an alert."""
+    msg = await message.reply_text("Frissítések keresése…")
     try:
         apps = await asyncio.to_thread(get_updateable_apps_sync)
-        context.application.bot_data["update_candidates"] = apps
+        application.bot_data["update_candidates"] = apps
 
         if not apps:
-            await msg.edit_text("✅ Minden alkalmazás naprakész.")
+            await msg.edit_text("✅ Már nincs elérhető alkalmazásfrissítés.")
             return
 
         lines = [f"⬆️ Elérhető frissítések: {len(apps)}", ""]
@@ -1092,8 +1102,21 @@ async def cmd_updates(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         ])
         await msg.edit_text("\n".join(lines)[:3500], reply_markup=keyboard)
     except Exception as exc:
-        log.exception("updates failed")
-        await msg.edit_text(f"❌ Frissítéslista hiba:\n{exc}")
+        log.exception("Unable to list updateable applications")
+        await msg.edit_text(f"❌ Frissítéslista hiba:\n{short_error(exc)}")
+
+
+async def cmd_updates(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not await require_allowed(update):
+        return
+
+    if not ALLOW_APP_UPDATES:
+        await update.effective_message.reply_text(
+            "❌ Az appfrissítés le van tiltva."
+        )
+        return
+
+    await show_update_options(update.effective_message, context.application)
 
 
 async def callback_updates(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1298,7 +1321,7 @@ def main() -> None:
     app.add_handler(CommandHandler("updates", cmd_updates))
     app.add_handler(CommandHandler("restart", cmd_restart))
 
-    app.add_handler(CallbackQueryHandler(callback_alert, pattern=r"^alert:dismiss:"))
+    app.add_handler(CallbackQueryHandler(callback_alert, pattern=r"^alert:(dismiss:|updates$)"))
     app.add_handler(CallbackQueryHandler(callback_restart, pattern=r"^restart"))
     app.add_handler(CallbackQueryHandler(callback_updates, pattern=r"^updates:"))
 

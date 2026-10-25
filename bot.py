@@ -656,7 +656,7 @@ async def send_alert(application: Application, alert: dict) -> None:
 
     level = str(alert.get("level", "INFO")).upper()
     text = format_alert_text(alert)
-    uuid_value = str(alert.get("uuid", ""))
+    uuid_value = str(alert.get("uuid") or "")
 
     message = (
         f"{ALERT_ICONS.get(level, '•')} TrueNAS {level}\n\n"
@@ -907,7 +907,7 @@ async def cmd_alerts(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         for alert in active[:20]:
             level = str(alert.get("level", "INFO")).upper()
             text = format_alert_text(alert)
-            uuid_value = str(alert.get("uuid", ""))
+            uuid_value = str(alert.get("uuid") or "")
             await update.effective_message.reply_text(
                 f"{ALERT_ICONS.get(level, '•')} {level}\n\n{text}"[:4000],
                 reply_markup=alert_button(uuid_value, is_app_update_available_alert(alert)),
@@ -1084,7 +1084,7 @@ async def show_update_options(message: Any, application: Application) -> None:
     msg = await message.reply_text("Frissítések keresése…")
     try:
         apps = await asyncio.to_thread(get_updateable_apps_sync)
-        application.bot_data["update_candidates"] = apps
+        application.bot_data.setdefault("update_flows", {})[(msg.chat_id, msg.message_id)] = {"apps": apps}
 
         if not apps:
             await msg.edit_text("✅ Már nincs elérhető alkalmazásfrissítés.")
@@ -1134,20 +1134,22 @@ async def callback_updates(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         return
 
     data = query.data or ""
-    apps = context.application.bot_data.get("update_candidates")
+    flows = context.application.bot_data.setdefault("update_flows", {})
+    flow_key = (query.message.chat_id, query.message.message_id)
+    flow = flows.get(flow_key)
 
     if data == "updates:cancel":
+        flows.pop(flow_key, None)
         await query.edit_message_text("Frissítés megszakítva.")
         return
 
-    if not apps:
-        try:
-            apps = await asyncio.to_thread(get_updateable_apps_sync)
-            context.application.bot_data["update_candidates"] = apps
-        except Exception as exc:
-            await query.edit_message_text(f"❌ Nem sikerült lekérni az appokat:\n{exc}")
-            return
+    if not flow:
+        await query.edit_message_text(
+            "⚠️ A frissítési lista már nem aktív. Használd a /updates parancsot."
+        )
+        return
 
+    apps = flow["apps"]
     if not apps:
         await query.edit_message_text("✅ Már nincs elérhető frissítés.")
         return
@@ -1174,7 +1176,7 @@ async def callback_updates(update: Update, context: ContextTypes.DEFAULT_TYPE) -
             await query.edit_message_text("❌ Érvénytelen alkalmazás.")
             return
 
-        context.application.bot_data["selected_update_app"] = app
+        flow["selected_update_app"] = app
         await query.edit_message_text(
             f"Frissítsem ezt az alkalmazást?\n\n{update_label(app)}",
             reply_markup=InlineKeyboardMarkup([[
@@ -1185,11 +1187,12 @@ async def callback_updates(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         return
 
     if data == "updates:confirm_one":
-        app = context.application.bot_data.get("selected_update_app")
+        app = flow.get("selected_update_app")
         if not app:
             await query.edit_message_text("❌ Nincs kiválasztott alkalmazás.")
             return
 
+        flows.pop(flow_key, None)
         await query.edit_message_text(f"⏳ Frissítés folyamatban:\n{app.get('name', '?')}")
         suppress_app_update_alerts(context.application, 600)
         try:
@@ -1222,6 +1225,7 @@ async def callback_updates(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         return
 
     if data == "updates:confirm_all":
+        flows.pop(flow_key, None)
         started_at = time.monotonic()
         suppress_app_update_alerts(context.application, 600)
         status: list[dict[str, Any]] = [

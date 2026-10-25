@@ -9,8 +9,8 @@
 
 - **`/status`** — Host, IP address, uptime, CPU load/temperature, memory, pool capacity/health, and average pool disk temperatures.
 - **`/apps`** — Installed TrueNAS application status.
-- **`/alerts`** — Active TrueNAS alerts, including acknowledgement buttons.
-- **Automatic alert notifications** — Event subscription with polling fallback, deduplication, and per-alert acknowledgement.
+- **`/alerts`** — Active TrueNAS alerts with acknowledgement. Application-update alerts show an **⬆️ Frissítés** action beside **✅ Nyugtázás**.
+- **Automatic alert notifications** — Event subscription with polling fallback, deduplication, and per-alert acknowledgement. App-update alerts offer a direct shortcut to the one/all updates menu.
 - **`/updates`** — Available application updates, selectable updates, and per-application progress/error messages.
 - **`/restart`** — Restart explicitly allowed applications.
 - **`/version`** — Display the TruBot image version.
@@ -65,11 +65,16 @@ Use a **dedicated, least-privilege TrueNAS account**. Read functions need access
 
 ## Versioning and updates
 
-GitHub Actions builds and publishes multi-architecture Docker images to **GHCR**:
+Current version: **v1.1.0** ([VERSION](VERSION)).
 
-- Every push to `main` publishes `ghcr.io/szlovakricsi/trubot:latest` and `:edge` once the workflow succeeds.
+GitHub Actions runs tests, builds and publishes multi-architecture Docker images to **GHCR**:
+
+- Every push to `main` publishes `ghcr.io/szlovakricsi/trubot:latest`, `:edge`, and the version tag in `VERSION` (currently `:v1.1.0`) after successful validation and build.
+- A new version also creates a GitHub Release automatically once its Docker build succeeds.
 - Pushing a version tag, for example `v1.0.0`, also publishes versioned tags such as `:v1.0.0` and `:1.0.0`.
 - TrueNAS can check upstream image changes for custom applications. An available image update appears in TrueNAS Apps; you choose when to install it. Detection depends on TrueNAS polling and a published, accessible GHCR package.
+
+For subsequent releases, update `VERSION` in the same commit as the code changes; the workflow publishes the new versioned image and GitHub release.
 
 **Note:** GitHub Releases and Git tags label versions; pushing a tag does **not** itself update a running TrueNAS container. The GHCR build must succeed, and TrueNAS must pull/redeploy the newer image.
 
@@ -88,6 +93,15 @@ docker run --rm \
 ```
 
 Do not commit shell history or files containing real keys. `/version` returns `dev` for local images unless a build-time version is provided.
+
+## Application update notifications (v1.1.0)
+
+If TrueNAS sends an **application update available** alert, both automatically delivered notifications and `/alerts` show **✅ Nyugtázás** and **⬆️ Frissítés** buttons. The update button is hidden when `ALLOW_APP_UPDATES=false`.
+
+- **Nyugtázás** dismisses the alert, without installing updates.
+- **Frissítés** opens a separate Telegram message showing the *current* updateable apps from TrueNAS.
+- Choose **1️⃣ Egy app** or **♻️ Összes**, then confirm the selection to initiate the existing TrueNAS update flow.
+- The original alert stays visible and is not automatically acknowledged or removed when requesting app updates.
 
 ## Compatibility
 

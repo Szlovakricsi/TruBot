@@ -218,3 +218,15 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# TruBot secrets, configuration and persistent state
+.env
+.env.*
+!.env.example
+config.yaml
+config-*.yaml
+state.json
+state*.json
+data/
+.deps/
+*.secret

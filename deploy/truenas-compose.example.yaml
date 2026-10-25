@@ -1,0 +1,26 @@
+# TruBot - TrueNAS SCALE: Apps > Install via YAML
+# Copy and edit values locally. NEVER commit actual credentials.
+# For migration, use your existing TrueNASTelegram folder so state.json survives.
+services:
+  trubot:
+    image: ghcr.io/szlovakricsi/trubot:latest
+    restart: unless-stopped
+    environment:
+      TZ: Europe/Budapest
+      TELEGRAM_BOT_TOKEN: "CHANGE_ME_BOTFATHER_TOKEN"
+      ALLOWED_CHAT_IDS: "CHANGE_ME_NUMERIC_CHAT_ID"
+      TRUENAS_URI: "wss://YOUR_TRUENAS_IP/api/current"
+      TRUENAS_USERNAME: "telegrambot"
+      TRUENAS_API_KEY: "CHANGE_ME_TRUENAS_API_KEY"
+      TRUENAS_VERIFY_SSL: "false"
+      STATUS_IP: ""
+      ALLOWED_RESTART_APPS: "sonarr,radarr,jellyfin"
+      ALLOW_APP_UPDATES: "true"
+      UPGRADE_SNAPSHOT_HOSTPATHS: "true"
+      ALERT_MIN_LEVEL: "INFO"
+      ALERT_POLL_SECONDS: "60"
+      ALERT_SEND_EXISTING_ON_START: "false"
+      STATE_FILE: "/data/state.json"
+    volumes:
+      # Replace YOUR_POOL with your pool name. Preserve old state.json here.
+      - /mnt/YOUR_POOL/APPS/TrueNASTelegram:/data

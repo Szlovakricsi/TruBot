@@ -66,6 +66,8 @@ class AppUpdateAlertTests(unittest.TestCase):
         self.assertIn('CallbackQueryHandler(callback_alert, pattern=r"^alert:(dismiss:|updates$)")', CODE)
         self.assertIn('callback_data="updates:confirm_all"', CODE)
         self.assertIn('callback_data="updates:confirm_one"', CODE)
+        self.assertIn('application.bot_data.setdefault("update_flows"', CODE)
+        self.assertIn('flow_key = (query.message.chat_id, query.message.message_id)', CODE)
 
 
 if __name__ == "__main__":

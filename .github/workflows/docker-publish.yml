@@ -10,6 +10,10 @@ permissions:
   contents: write
   packages: write
 
+concurrency:
+  group: trubot-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   docker:
     name: Publish Docker image

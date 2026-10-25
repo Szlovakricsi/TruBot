@@ -148,7 +148,7 @@ async def require_allowed(update: Update) -> bool:
         log.warning("Unauthorized Telegram chat attempted access: %s", chat.id)
         if update.effective_message:
             await update.effective_message.reply_text(
-                "Nincs jogosultság ehhez a bothoz."
+                "Access denied."
             )
     return False
 
@@ -182,8 +182,8 @@ def format_uptime(seconds: int | float | None) -> str:
     days, rest = divmod(seconds, 86400)
     hours = rest // 3600
     if days:
-        return f"{days} nap {hours} óra"
-    return f"{hours} óra"
+        return f"{days}d {hours}h"
+    return f"{hours}h"
 
 
 def safe_float(value: Any) -> float | None:
@@ -502,16 +502,16 @@ def upgrade_app_sync(app: dict) -> None:
         )
         return
 
-    raise RuntimeError(f"Nincs elérhető frissítés: {name}")
+    raise RuntimeError(f"No update available for {name}")
 
 
 def update_label(app: dict) -> str:
     name = str(app.get("name", "?"))
     current = str(app.get("human_version") or app.get("version") or "?")
-    latest = str(app.get("latest_version") or "új image")
+    latest = str(app.get("latest_version") or "new image")
     if app.get("upgrade_available"):
         return f"{name}: {current} → {latest}"
-    return f"{name}: Docker image frissítés"
+    return f"{name}: Docker image update"
 
 
 # ---------------------------------------------------------------------------
@@ -635,12 +635,12 @@ def alert_button(
     buttons = []
     if uuid_value:
         buttons.append(InlineKeyboardButton(
-            "✅ Nyugtázás",
+            "✅ Acknowledge",
             callback_data=f"alert:dismiss:{uuid_value}",
         ))
     if is_app_update and ALLOW_APP_UPDATES:
         buttons.append(InlineKeyboardButton(
-            "⬆️ Frissítés",
+            "⬆️ Update",
             callback_data="alert:updates",
         ))
     return InlineKeyboardMarkup([buttons]) if buttons else None
@@ -771,19 +771,27 @@ async def alert_safety_poll(application: Application) -> None:
 # Commands
 # ---------------------------------------------------------------------------
 
+# Shared descriptions for the Telegram command menu and /help.
+COMMAND_DESCRIPTIONS: tuple[tuple[str, str], ...] = (
+    ("status", "System health"),
+    ("apps", "Installed apps"),
+    ("alerts", "Active alerts"),
+    ("updates", "App updates"),
+    ("restart", "Restart an app"),
+    ("version", "Bot version"),
+    ("help", "List commands"),
+)
+
+
 async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not await require_allowed(update):
         return
-    await update.effective_message.reply_text(
-        "TruBot – TrueNAS Telegram bot\n\n"
-        "/status - rendszer, RAM, CPU, poolok, lemezhőmérséklet\n"
-        "/apps - TrueNAS Apps állapota\n"
-        "/alerts - aktív riasztások + nyugtázás\n"
-        "/updates - alkalmazásfrissítések\n"
-        "/restart <app> - engedélyezett app újraindítása\n"
-        "/version - TruBot verzió\n"
-        "/help - parancsok"
+    lines = ["🤖 TruBot — TrueNAS on Telegram", ""]
+    lines.extend(
+        f"/{command}{' <app>' if command == 'restart' else ''} — {description}"
+        for command, description in COMMAND_DESCRIPTIONS
     )
+    await update.effective_message.reply_text("\n".join(lines))
 
 
 async def cmd_version(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -796,7 +804,7 @@ async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     if not await require_allowed(update):
         return
 
-    msg = await update.effective_message.reply_text("Lekérdezés…")
+    msg = await update.effective_message.reply_text("Loading system status…")
     try:
         data = await asyncio.to_thread(get_status_data_sync)
         info = data["info"]
@@ -805,9 +813,9 @@ async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
 
         lines = [
             f"🖥️ {info.get('hostname', 'TrueNAS')}",
-            f"Állapot: {'🟢' if state == 'READY' else '🟠'} {state}",
+            f"Status: {'🟢' if state == 'READY' else '🟠'} {state}",
             f"IP: {data['ip']}",
-            f"Verzió: {info.get('version', '?')}",
+            f"Version: {info.get('version', '?')}",
             f"Uptime: {format_uptime(info.get('uptime_seconds'))}",
         ]
 
@@ -819,7 +827,7 @@ async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
                 f"({percent(mem_used, mem_total)})"
             )
         else:
-            lines.append(f"RAM összesen: {human_bytes(mem_total)} | használt: ?")
+            lines.append(f"RAM: ? / {human_bytes(mem_total)}")
 
         loadavg = info.get("loadavg") or []
         load_text = " / ".join(
@@ -828,11 +836,11 @@ async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
 
         cpu_temp = data.get("cpu_temp")
         temp_text = f"{cpu_temp:.1f} °C" if cpu_temp is not None else "n/a"
-        lines.append(f"Load (1/5/15p): {load_text} | CPU átlag: {temp_text}")
+        lines.append(f"Load (1/5/15m): {load_text} | Avg CPU temp: {temp_text}")
 
-        lines += ["", "💾 Poolok:"]
+        lines += ["", "💾 Storage pools:"]
         if not pools:
-            lines.append("– nincs találat")
+            lines.append("— No pools found")
         else:
             for pool in pools:
                 name = str(pool.get("name", "?"))
@@ -845,22 +853,22 @@ async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
 
                 lines.append(f"{icon} {name}: {status}")
                 lines.append(
-                    f"   Tárhely: {human_bytes(used)} / {human_bytes(size)} "
+                    f"   Used: {human_bytes(used)} / {human_bytes(size)} "
                     f"({percent(used, size)})"
                 )
-                lines.append(f"   Lemezek átlaghőm.: {ptemp}")
+                lines.append(f"   Avg disk temp: {ptemp}")
 
         await msg.edit_text("\n".join(lines)[:4000])
     except Exception as exc:
         log.exception("status failed")
-        await msg.edit_text(f"❌ TrueNAS API hiba:\n{exc}")
+        await msg.edit_text(f"❌ TrueNAS API error:\n{exc}")
 
 
 async def cmd_apps(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not await require_allowed(update):
         return
 
-    msg = await update.effective_message.reply_text("Appok lekérdezése…")
+    msg = await update.effective_message.reply_text("Loading apps…")
     try:
         apps = await asyncio.to_thread(tn_call, "app.query", [], {})
         apps = sorted(apps, key=lambda a: str(a.get("name", "")).lower())
@@ -886,23 +894,23 @@ async def cmd_apps(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         await msg.edit_text("\n".join(lines)[:4000])
     except Exception as exc:
         log.exception("apps failed")
-        await msg.edit_text(f"❌ TrueNAS API hiba:\n{exc}")
+        await msg.edit_text(f"❌ TrueNAS API error:\n{exc}")
 
 
 async def cmd_alerts(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not await require_allowed(update):
         return
 
-    msg = await update.effective_message.reply_text("Riasztások lekérdezése…")
+    msg = await update.effective_message.reply_text("Loading alerts…")
     try:
         alerts = await asyncio.to_thread(tn_call, "alert.list")
         active = [a for a in alerts if not a.get("dismissed")]
 
         if not active:
-            await msg.edit_text("✅ Nincs aktív TrueNAS riasztás.")
+            await msg.edit_text("✅ No active alerts.")
             return
 
-        await msg.edit_text(f"⚠️ Aktív TrueNAS riasztások: {len(active)}")
+        await msg.edit_text(f"⚠️ Active alerts: {len(active)}")
 
         for alert in active[:20]:
             level = str(alert.get("level", "INFO")).upper()
@@ -915,11 +923,11 @@ async def cmd_alerts(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
 
         if len(active) > 20:
             await update.effective_message.reply_text(
-                f"…és még {len(active) - 20} aktív riasztás."
+                f"…and {len(active) - 20} more alerts."
             )
     except Exception as exc:
         log.exception("alerts failed")
-        await msg.edit_text(f"❌ TrueNAS API hiba:\n{exc}")
+        await msg.edit_text(f"❌ TrueNAS API error:\n{exc}")
 
 
 async def callback_alert(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -929,13 +937,13 @@ async def callback_alert(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     await query.answer()
 
     if not is_allowed(update):
-        await query.edit_message_text("Nincs jogosultság.")
+        await query.edit_message_text("Access denied.")
         return
 
     data = query.data or ""
     if data == "alert:updates":
         if not ALLOW_APP_UPDATES:
-            await query.answer("Az alkalmazásfrissítés le van tiltva.", show_alert=True)
+            await query.answer("App updates are disabled.", show_alert=True)
             return
         # Keep the original alert (and its acknowledgement button) intact.
         # A new message presents update choices and requires confirmation.
@@ -948,13 +956,13 @@ async def callback_alert(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     uuid_value = data.split(":", 2)[2]
     try:
         await asyncio.to_thread(tn_call, "alert.dismiss", uuid_value)
-        original = query.message.text or "TrueNAS riasztás"
-        if "✅ Nyugtázva" not in original:
-            original += "\n\n✅ Nyugtázva"
+        original = query.message.text or "TrueNAS alert"
+        if "✅ Acknowledged" not in original:
+            original += "\n\n✅ Acknowledged"
         await query.edit_message_text(original[:4000])
     except Exception as exc:
         log.exception("alert dismiss failed")
-        await query.answer(f"Nyugtázási hiba: {exc}", show_alert=True)
+        await query.answer(f"Acknowledgement failed: {exc}", show_alert=True)
 
 
 async def cmd_restart(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -962,26 +970,26 @@ async def cmd_restart(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         return
 
     if not context.args:
-        allowed = ", ".join(sorted(ALLOWED_RESTART_APPS)) or "(nincs beállítva)"
+        allowed = ", ".join(sorted(ALLOWED_RESTART_APPS)) or "(none)"
         await update.effective_message.reply_text(
-            "Használat: /restart <app>\n"
-            f"Engedélyezett appok: {allowed}"
+            "Usage: /restart <app>\n"
+            f"Allowed apps: {allowed}"
         )
         return
 
     app = context.args[0].strip().lower()
     if app not in ALLOWED_RESTART_APPS:
         await update.effective_message.reply_text(
-            f"❌ A(z) '{app}' app nincs az újraindítható appok listáján."
+            f"❌ App not allowed: {app}"
         )
         return
 
     keyboard = InlineKeyboardMarkup([[
-        InlineKeyboardButton("✅ Igen, újraindítás", callback_data=f"restart:{app}"),
-        InlineKeyboardButton("❌ Mégse", callback_data="restart_cancel"),
+        InlineKeyboardButton("✅ Restart", callback_data=f"restart:{app}"),
+        InlineKeyboardButton("❌ Cancel", callback_data="restart_cancel"),
     ]])
     await update.effective_message.reply_text(
-        f"Biztosan újraindítsam ezt az appot?\n\n{app}",
+        f"Restart this app?\n\n{app}",
         reply_markup=keyboard,
     )
 
@@ -993,34 +1001,34 @@ async def callback_restart(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     await query.answer()
 
     if not is_allowed(update):
-        await query.edit_message_text("Nincs jogosultság.")
+        await query.edit_message_text("Access denied.")
         return
 
     data = query.data or ""
     if data == "restart_cancel":
-        await query.edit_message_text("Újraindítás megszakítva.")
+        await query.edit_message_text("Restart cancelled.")
         return
 
     app = data.split(":", 1)[1].lower()
     if app not in ALLOWED_RESTART_APPS:
-        await query.edit_message_text("Ez az app nincs engedélyezve.")
+        await query.edit_message_text("App not allowed.")
         return
 
-    await query.edit_message_text(f"🔄 {app} újraindítása…")
+    await query.edit_message_text(f"🔄 Restarting {app}…")
     try:
         await asyncio.to_thread(restart_app_sync, app)
-        await query.edit_message_text(f"✅ {app} újraindítása befejeződött.")
+        await query.edit_message_text(f"✅ {app} restarted.")
     except Exception as exc:
         log.exception("restart failed")
-        await query.edit_message_text(f"❌ Újraindítási hiba:\n{exc}")
+        await query.edit_message_text(f"❌ Restart failed:\n{exc}")
 
 
 def format_elapsed(seconds: float) -> str:
     seconds = max(0, int(seconds))
     minutes, seconds = divmod(seconds, 60)
     if minutes:
-        return f"{minutes}p {seconds}mp"
-    return f"{seconds}mp"
+        return f"{minutes}m {seconds}s"
+    return f"{seconds}s"
 
 
 def short_error(exc: Exception, limit: int = 180) -> str:
@@ -1042,9 +1050,9 @@ def render_update_progress(
     remaining = total - done_count
 
     if finished:
-        header = "🏁 Frissítés befejezve"
+        header = "🏁 Updates complete"
     else:
-        header = f"⏳ Alkalmazásfrissítés: {done_count}/{total} kész"
+        header = f"⏳ Updating apps: {done_count}/{total} complete"
 
     lines = [header, ""]
     for idx, (app, item) in enumerate(zip(apps, status), start=1):
@@ -1052,26 +1060,26 @@ def render_update_progress(
         state = item.get("state", "waiting")
         if state == "ok":
             lines.append(
-                f"✅ {idx}/{total} {name} – kész ({format_elapsed(item.get('elapsed', 0))})"
+                f"✅ {idx}/{total} {name} — Done ({format_elapsed(item.get('elapsed', 0))})"
             )
         elif state == "failed":
             lines.append(
-                f"❌ {idx}/{total} {name} – HIBA ({format_elapsed(item.get('elapsed', 0))})"
+                f"❌ {idx}/{total} {name} — Failed ({format_elapsed(item.get('elapsed', 0))})"
             )
             if item.get("error"):
                 lines.append(f"   ↳ {item['error']}")
         elif state == "running":
-            lines.append(f"🔄 {idx}/{total} {name} – frissítés folyamatban…")
+            lines.append(f"🔄 {idx}/{total} {name} — Updating…")
         else:
-            lines.append(f"▫️ {idx}/{total} {name} – várakozik")
+            lines.append(f"▫️ {idx}/{total} {name} — Pending")
 
     lines += [""]
     if finished:
         ok_count = done_count - failed_count
-        lines.append(f"✅ Sikeres: {ok_count}   ❌ Hibás: {failed_count}")
-        lines.append(f"⏱ Összes idő: {format_elapsed(time.monotonic() - started_at)}")
+        lines.append(f"✅ Succeeded: {ok_count}   ❌ Failed: {failed_count}")
+        lines.append(f"⏱ Elapsed: {format_elapsed(time.monotonic() - started_at)}")
     else:
-        lines.append(f"⏳ Hátralévő: {remaining}")
+        lines.append(f"⏳ Remaining: {remaining}")
 
     result = "\n".join(lines)
     if len(result) > 4000:
@@ -1081,29 +1089,29 @@ def render_update_progress(
 
 async def show_update_options(message: Any, application: Application) -> None:
     """Open the regular one/all app update flow from a command or an alert."""
-    msg = await message.reply_text("Frissítések keresése…")
+    msg = await message.reply_text("Checking for updates…")
     try:
         apps = await asyncio.to_thread(get_updateable_apps_sync)
         application.bot_data.setdefault("update_flows", {})[(msg.chat_id, msg.message_id)] = {"apps": apps}
 
         if not apps:
-            await msg.edit_text("✅ Már nincs elérhető alkalmazásfrissítés.")
+            await msg.edit_text("✅ All apps are up to date.")
             return
 
-        lines = [f"⬆️ Elérhető frissítések: {len(apps)}", ""]
+        lines = [f"⬆️ Available updates: {len(apps)}", ""]
         lines += [f"• {update_label(app)}" for app in apps]
 
         keyboard = InlineKeyboardMarkup([
             [
-                InlineKeyboardButton("1️⃣ Egy app", callback_data="updates:one"),
-                InlineKeyboardButton("♻️ Összes", callback_data="updates:all"),
+                InlineKeyboardButton("1️⃣ One app", callback_data="updates:one"),
+                InlineKeyboardButton("♻️ Update all", callback_data="updates:all"),
             ],
-            [InlineKeyboardButton("❌ Mégse", callback_data="updates:cancel")],
+            [InlineKeyboardButton("❌ Cancel", callback_data="updates:cancel")],
         ])
         await msg.edit_text("\n".join(lines)[:3500], reply_markup=keyboard)
     except Exception as exc:
         log.exception("Unable to list updateable applications")
-        await msg.edit_text(f"❌ Frissítéslista hiba:\n{short_error(exc)}")
+        await msg.edit_text(f"❌ Could not load updates:\n{short_error(exc)}")
 
 
 async def cmd_updates(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1112,7 +1120,7 @@ async def cmd_updates(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
 
     if not ALLOW_APP_UPDATES:
         await update.effective_message.reply_text(
-            "❌ Az appfrissítés le van tiltva."
+            "❌ App updates are disabled."
         )
         return
 
@@ -1126,11 +1134,11 @@ async def callback_updates(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     await query.answer()
 
     if not is_allowed(update):
-        await query.edit_message_text("Nincs jogosultság.")
+        await query.edit_message_text("Access denied.")
         return
 
     if not ALLOW_APP_UPDATES:
-        await query.edit_message_text("Az appfrissítés le van tiltva.")
+        await query.edit_message_text("App updates are disabled.")
         return
 
     data = query.data or ""
@@ -1140,18 +1148,18 @@ async def callback_updates(update: Update, context: ContextTypes.DEFAULT_TYPE) -
 
     if data == "updates:cancel":
         flows.pop(flow_key, None)
-        await query.edit_message_text("Frissítés megszakítva.")
+        await query.edit_message_text("Update cancelled.")
         return
 
     if not flow:
         await query.edit_message_text(
-            "⚠️ A frissítési lista már nem aktív. Használd a /updates parancsot."
+            "⚠️ This update menu expired. Run /updates again."
         )
         return
 
     apps = flow["apps"]
     if not apps:
-        await query.edit_message_text("✅ Már nincs elérhető frissítés.")
+        await query.edit_message_text("✅ No updates available.")
         return
 
     if data == "updates:one":
@@ -1161,9 +1169,9 @@ async def callback_updates(update: Update, context: ContextTypes.DEFAULT_TYPE) -
                 callback_data=f"updates:select:{idx}",
             )
         ] for idx, app in enumerate(apps)]
-        rows.append([InlineKeyboardButton("❌ Mégse", callback_data="updates:cancel")])
+        rows.append([InlineKeyboardButton("❌ Cancel", callback_data="updates:cancel")])
         await query.edit_message_text(
-            "Melyik alkalmazást szeretnéd frissíteni?",
+            "Select an app to update:",
             reply_markup=InlineKeyboardMarkup(rows),
         )
         return
@@ -1173,15 +1181,15 @@ async def callback_updates(update: Update, context: ContextTypes.DEFAULT_TYPE) -
             idx = int(data.rsplit(":", 1)[1])
             app = apps[idx]
         except Exception:
-            await query.edit_message_text("❌ Érvénytelen alkalmazás.")
+            await query.edit_message_text("❌ Invalid app selection.")
             return
 
         flow["selected_update_app"] = app
         await query.edit_message_text(
-            f"Frissítsem ezt az alkalmazást?\n\n{update_label(app)}",
+            f"Update this app?\n\n{update_label(app)}",
             reply_markup=InlineKeyboardMarkup([[
-                InlineKeyboardButton("✅ Frissítés", callback_data="updates:confirm_one"),
-                InlineKeyboardButton("❌ Mégse", callback_data="updates:cancel"),
+                InlineKeyboardButton("✅ Update", callback_data="updates:confirm_one"),
+                InlineKeyboardButton("❌ Cancel", callback_data="updates:cancel"),
             ]]),
         )
         return
@@ -1189,37 +1197,37 @@ async def callback_updates(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     if data == "updates:confirm_one":
         app = flow.get("selected_update_app")
         if not app:
-            await query.edit_message_text("❌ Nincs kiválasztott alkalmazás.")
+            await query.edit_message_text("❌ No app selected.")
             return
 
         flows.pop(flow_key, None)
-        await query.edit_message_text(f"⏳ Frissítés folyamatban:\n{app.get('name', '?')}")
+        await query.edit_message_text(f"⏳ Updating:\n{app.get('name', '?')}")
         suppress_app_update_alerts(context.application, 600)
         try:
             await asyncio.to_thread(upgrade_app_sync, app)
             suppress_app_update_alerts(context.application, 300)
             await query.edit_message_text(
-                f"✅ Frissítés befejeződött:\n{app.get('name', '?')}"
+                f"✅ Update complete:\n{app.get('name', '?')}"
             )
         except Exception as exc:
             suppress_app_update_alerts(context.application, 300)
             log.exception("single app update failed")
             await query.edit_message_text(
-                f"❌ Frissítési hiba ({app.get('name', '?')}):\n{exc}"
+                f"❌ Update failed ({app.get('name', '?')}):\n{exc}"
             )
         return
 
     if data == "updates:all":
-        lines = ["Az összes elérhető frissítés telepítése:", ""]
+        lines = ["Update all listed apps?", ""]
         lines += [f"• {app.get('name', '?')}" for app in apps]
         await query.edit_message_text(
             "\n".join(lines)[:3500],
             reply_markup=InlineKeyboardMarkup([[
                 InlineKeyboardButton(
-                    f"✅ Igen, mind ({len(apps)})",
+                    f"✅ Update all ({len(apps)})",
                     callback_data="updates:confirm_all",
                 ),
-                InlineKeyboardButton("❌ Mégse", callback_data="updates:cancel"),
+                InlineKeyboardButton("❌ Cancel", callback_data="updates:cancel"),
             ]]),
         )
         return
@@ -1281,15 +1289,7 @@ async def callback_updates(update: Update, context: ContextTypes.DEFAULT_TYPE) -
 # ---------------------------------------------------------------------------
 
 async def post_init(application: Application) -> None:
-    await application.bot.set_my_commands([
-        ("status", "Rendszer, RAM, CPU, poolok és hőmérsékletek"),
-        ("apps", "TrueNAS Apps állapota"),
-        ("alerts", "Aktív riasztások és nyugtázás"),
-        ("updates", "Alkalmazásfrissítések"),
-        ("restart", "App újraindítása"),
-        ("version", "TruBot verzió"),
-        ("help", "Parancsok"),
-    ])
+    await application.bot.set_my_commands(list(COMMAND_DESCRIPTIONS))
 
     loop = asyncio.get_running_loop()
     threading.Thread(

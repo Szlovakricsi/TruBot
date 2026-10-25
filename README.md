@@ -7,7 +7,7 @@
 
 ## Features
 
-- **`/status`** — Host, IP address, uptime, CPU load/temperature, memory, pool capacity/health, and average pool disk temperatures.
+- **`/status`** — Host, IP address, uptime, CPU load/temperature, memory, storage pools, disk temperatures, and UPS status when configured.
 - **`/apps`** — Installed TrueNAS application status.
 - **`/alerts`** — Active TrueNAS alerts with acknowledgement. Application-update alerts show an **⬆️ Update** action beside **✅ Acknowledge**.
 - **Automatic alert notifications** — Event subscription with polling fallback, deduplication, and per-alert acknowledgement. App-update alerts offer a direct shortcut to the one/all updates menu.
@@ -71,6 +71,8 @@ Recommended: use the prebuilt Docker image from GitHub Container Registry rather
 | `ALERT_SEND_EXISTING_ON_START` | `false` | Send pre-existing alerts at first startup |
 | `STATE_FILE` | `/data/state.json` | Persistent alert notification state |
 | `TRUBOT_VERSION` | image-defined | Version reported by `/version` |
+| `UPS_NUT_HOST` | TrueNAS hostname | Optional NUT server hostname for live mains/battery mode |
+| `UPS_NUT_PORT` | `3493` | NUT server port |
 
 ### Permissions
 
@@ -81,11 +83,11 @@ Use a **dedicated, least-privilege TrueNAS account**. Read functions need access
 
 ## Versioning and updates
 
-Current version: **v1.2.0** ([VERSION](VERSION)).
+Current version: **v1.3.0** ([VERSION](VERSION)).
 
 GitHub Actions runs tests, builds and publishes multi-architecture Docker images to **GHCR**:
 
-- Every push to `main` publishes `ghcr.io/szlovakricsi/trubot:latest`, `:edge`, and the version tag in `VERSION` (currently `:v1.2.0`) after successful validation and build.
+- Every push to `main` publishes `ghcr.io/szlovakricsi/trubot:latest`, `:edge`, and the version tag in `VERSION` (currently `:v1.3.0`) after successful validation and build.
 - A new version also creates a GitHub Release automatically once its Docker build succeeds.
 - Pushing a version tag, for example `v1.0.0`, also publishes versioned tags such as `:v1.0.0` and `:1.0.0`.
 - TrueNAS can check upstream image changes for custom applications. An available image update appears in TrueNAS Apps; you choose when to install it. Detection depends on TrueNAS polling and a published, accessible GHCR package.
@@ -109,6 +111,22 @@ docker run --rm \
 ```
 
 Do not commit shell history or files containing real keys. `/version` returns `dev` for local images unless a build-time version is provided.
+
+## UPS status in `/status`
+
+When the **UPS service is enabled or running**, `/status` adds a section showing:
+
+```text
+🔋 UPS: Server UPS
+Power: 🟢 Mains
+Battery: 94%
+Battery voltage: 26.8 V
+```
+
+- The TrueNAS API's `service.query` identifies whether UPS monitoring is configured and running; `ups.config` supplies its identifier. `reporting.get_data` supplies the battery percentage and battery voltage where those metrics exist. Unsupported metrics display `N/A`.
+- The authoritative power mode comes from NUT `ups.status`: `OL` means **Mains** and `OB` means **Battery**. The bot queries NUT through its read-only TCP protocol, using `UPS_NUT_HOST`/`UPS_NUT_PORT` if configured, or the TrueNAS host from `TRUENAS_URI` by default. If NUT is inaccessible, it displays **Unknown** rather than assuming mains power.
+- TrueNAS normally binds NUT locally unless its UPS *Remote Monitor* setting is enabled. A Docker container on a different network may not be able to reach that local-only endpoint. Only enable remote NUT monitoring on a trusted network protected by a firewall; it exposes the NUT service on TCP 3493. Host networking is an alternative if appropriate for your installation.
+- The UPS section is hidden when the UPS service is disabled and not running. A configured but stopped UPS service reports **Service stopped**. UPS errors do not break system status.
 
 ## Application update notifications
 

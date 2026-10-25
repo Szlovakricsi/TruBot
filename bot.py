@@ -5,6 +5,7 @@ import json
 import logging
 import os
 import re
+import socket
 import threading
 import time
 from pathlib import Path
@@ -76,6 +77,11 @@ STATE_FILE = Path(os.environ.get("STATE_FILE", "/app/state.json"))
 # Optional override. If empty, /status derives the primary address from
 # TRUENAS_URI or the active TrueNAS interfaces.
 STATUS_IP = os.environ.get("STATUS_IP", "").strip()
+
+# Optional NUT status endpoint. If unset, use the host from TRUENAS_URI
+# (or the remote UPS server in SLAVE mode). No port is published by TruBot.
+UPS_NUT_HOST = os.environ.get("UPS_NUT_HOST", "").strip()
+UPS_NUT_PORT = int(os.environ.get("UPS_NUT_PORT", "3493"))
 
 ALERT_LEVELS = {
     "INFO": 10,
@@ -390,6 +396,177 @@ def pool_disk_temperatures_sync(pools: list[dict]) -> dict[str, float | None]:
     }
 
 
+def ups_power_mode(raw_status: str | None) -> str:
+    """Interpret NUT flags, avoiding false 'Mains' reports on missing data."""
+    flags = set((raw_status or "").upper().split())
+    if "OB" in flags:
+        return "Battery (low)" if "LB" in flags else "Battery"
+    if "BYPASS" in flags:
+        return "Bypass"
+    if "OL" in flags:
+        return "Mains (low battery)" if "LB" in flags else "Mains"
+    if "OFF" in flags:
+        return "Offline"
+    return "Unknown"
+
+
+def read_nut_variables(host: str, port: int, identifier: str) -> dict[str, str]:
+    """Read three public, read-only NUT variables with short socket timeouts.
+
+    This needs the NUT upsd server to be reachable from the container.
+    Credentials, shell access and privileged host mounts are not required.
+    """
+    if not re.fullmatch(r"[a-zA-Z0-9_.-]+", identifier):
+        raise ValueError("Invalid NUT UPS identifier")
+
+    result: dict[str, str] = {}
+    with socket.create_connection((host, port), timeout=2.0) as conn:
+        conn.settimeout(2.0)
+        with conn.makefile("r", encoding="utf-8", errors="replace") as stream:
+            for variable in ("ups.status", "battery.charge", "battery.voltage"):
+                conn.sendall(f"GET VAR {identifier} {variable}\n".encode("ascii"))
+                line = stream.readline(2048).strip()
+                prefix = f"VAR {identifier} {variable} "
+                if line.startswith(prefix):
+                    raw = line[len(prefix):]
+                    # NUT's variable responses are quoted. Strip only the
+                    # enclosing quote characters; numeric/status values do
+                    # not contain embedded escapes.
+                    result[variable] = raw[1:-1] if raw.startswith('"') and raw.endswith('"') else raw
+    return result
+
+
+def ups_graph_value(graph: dict) -> float | None:
+    """Pick a UPS metric, never the graph's timestamp column."""
+    samples = latest_reporting_values(graph)
+    for key, value in samples.items():
+        if str(key).lower().strip() in ("time", "timestamp", "date"):
+            continue
+        metric = safe_float(value)
+        if metric is not None:
+            return metric
+    return None
+
+
+def get_ups_data_sync() -> dict | None:
+    """Detect an active TrueNAS UPS and gather NUT/Netdata measurements.
+
+    UPS config alone does not imply a connected UPS: the config object
+    exists on systems without one. A disabled, stopped service is omitted.
+    Missing or inaccessible measurements never become guessed values.
+    """
+    try:
+        services = tn_call("service.query", [["service", "=", "ups"]], {})
+    except Exception:
+        log.warning("Unable to check UPS service state", exc_info=True)
+        return None
+
+    service = next((s for s in services or [] if s.get("service") == "ups"), None)
+    if not service or not (service.get("enable") or service.get("state") == "RUNNING"):
+        return None
+
+    try:
+        config = tn_call("ups.config")
+    except Exception:
+        log.warning("Cannot read UPS configuration", exc_info=True)
+        config = {}
+
+    identifier = str(config.get("identifier") or "ups").strip()
+    description = str(config.get("description") or "").strip()
+    ups = {
+        "name": description or identifier,
+        "power": "Unknown",
+        "charge": None,
+        "battery_voltage": None,
+    }
+
+    if service.get("state") != "RUNNING":
+        ups["power"] = "Service stopped"
+        return ups
+
+    # NUT exposes the authoritative OL (mains) / OB (battery) flags.
+    # The daemon may only listen on localhost unless Remote Monitor
+    # is enabled in TrueNAS. Failure does not abort the status command.
+    if str(config.get("mode") or "").upper() == "SLAVE":
+        host = UPS_NUT_HOST or str(config.get("remotehost") or "").strip()
+        port = UPS_NUT_PORT if UPS_NUT_HOST else int(config.get("remoteport") or 3493)
+    else:
+        host = UPS_NUT_HOST or (urlparse(TRUENAS_URI).hostname or "")
+        port = UPS_NUT_PORT
+
+    nut_values: dict[str, str] = {}
+    if host:
+        try:
+            nut_values = read_nut_variables(host, port, identifier)
+        except (OSError, ValueError):
+            log.debug("NUT endpoint unavailable; using TrueNAS reporting data")
+
+    if nut_values.get("ups.status"):
+        ups["power"] = ups_power_mode(nut_values["ups.status"])
+    ups["charge"] = safe_float(nut_values.get("battery.charge"))
+    ups["battery_voltage"] = safe_float(nut_values.get("battery.voltage"))
+
+    # The normal TrueNAS reporting API exposes UPS charge and voltage even
+    # when port 3493 is not reachable from the TruBot container.
+    if ups["charge"] is None or ups["battery_voltage"] is None:
+        try:
+            graphs = tn_call(
+                "reporting.get_data",
+                [
+                    {"name": "upscharge"},
+                    {"name": "upsvoltage", "identifier": "battery"},
+                ],
+                {"unit": "HOUR", "page": 1, "aggregate": False},
+            )
+            for graph in graphs or []:
+                if not isinstance(graph, dict):
+                    continue
+                name = str(graph.get("name") or "").lower()
+                metric = ups_graph_value(graph)
+                if metric is None:
+                    continue
+                if name == "upscharge" and ups["charge"] is None and 0 <= metric <= 100:
+                    ups["charge"] = metric
+                elif (
+                    name == "upsvoltage"
+                    and str(graph.get("identifier") or "") == "battery"
+                    and ups["battery_voltage"] is None
+                    and metric >= 0
+                ):
+                    ups["battery_voltage"] = metric
+        except Exception:
+            log.warning("Unable to fetch UPS reporting data", exc_info=True)
+
+    return ups
+
+
+def render_ups_lines(ups: dict | None) -> list[str]:
+    """Append a compact UPS section only when a UPS service is configured."""
+    if ups is None:
+        return []
+
+    power = str(ups.get("power") or "Unknown")
+    charge = safe_float(ups.get("charge"))
+    voltage = safe_float(ups.get("battery_voltage"))
+    if power.startswith("Battery"):
+        icon = "🟠"
+    elif power.startswith("Mains"):
+        icon = "🟢"
+    else:
+        icon = "⚪"
+
+    charge_text = f"{charge:g}%" if charge is not None else "N/A"
+    voltage_text = f"{voltage:.1f} V" if voltage is not None else "N/A"
+
+    return [
+        "",
+        f"🔋 UPS: {ups.get('name') or 'UPS'}",
+        f"Power: {icon} {power}",
+        f"Battery: {charge_text}",
+        f"Battery voltage: {voltage_text}",
+    ]
+
+
 def get_status_data_sync() -> dict:
     c = open_truenas()
     try:
@@ -444,6 +621,12 @@ def get_status_data_sync() -> dict:
 
     pool_temps = pool_disk_temperatures_sync(pools)
 
+    try:
+        ups = get_ups_data_sync()
+    except Exception:
+        log.exception("UPS status lookup failed")
+        ups = None
+
     return {
         "info": info,
         "state": state,
@@ -453,6 +636,7 @@ def get_status_data_sync() -> dict:
         "mem_used": mem_used,
         "cpu_temp": cpu_temp,
         "pool_temps": pool_temps,
+        "ups": ups,
     }
 
 
@@ -857,6 +1041,8 @@ async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
                     f"({percent(used, size)})"
                 )
                 lines.append(f"   Avg disk temp: {ptemp}")
+
+        lines.extend(render_ups_lines(data.get("ups")))
 
         await msg.edit_text("\n".join(lines)[:4000])
     except Exception as exc:

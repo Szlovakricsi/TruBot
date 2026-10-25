@@ -14,6 +14,9 @@ services:
       TRUENAS_API_KEY: "CHANGE_ME_TRUENAS_API_KEY"
       TRUENAS_VERIFY_SSL: "false"
       STATUS_IP: ""
+      # Optional if the NUT server is on another host; empty uses TRUENAS_URI host.
+      UPS_NUT_HOST: ""
+      UPS_NUT_PORT: "3493"
       ALLOWED_RESTART_APPS: "sonarr,radarr,jellyfin"
       ALLOW_APP_UPDATES: "true"
       UPGRADE_SNAPSHOT_HOSTPATHS: "true"

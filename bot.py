@@ -68,6 +68,12 @@ UPGRADE_SNAPSHOT_HOSTPATHS = os.environ.get(
 # INFO is the lowest normal TrueNAS alert level, therefore INFO = all alerts.
 ALERT_MIN_LEVEL = os.environ.get("ALERT_MIN_LEVEL", "INFO").upper().strip()
 ALERT_POLL_SECONDS = max(30, int(os.environ.get("ALERT_POLL_SECONDS", "60")))
+APP_UPDATE_NOTIFICATIONS = os.environ.get(
+    "APP_UPDATE_NOTIFICATIONS", "true"
+).lower() in {"1", "true", "yes", "on"}
+APP_UPDATE_POLL_SECONDS = max(
+    60, int(os.environ.get("APP_UPDATE_POLL_SECONDS", "300"))
+)
 ALERT_SEND_EXISTING_ON_START = os.environ.get(
     "ALERT_SEND_EXISTING_ON_START", "false"
 ).lower() in {"1", "true", "yes", "on"}
@@ -699,6 +705,113 @@ def update_label(app: dict) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Proactive application-update notifications
+# ---------------------------------------------------------------------------
+
+def app_update_fingerprint(app: dict) -> str:
+    """Stable ID for an actionable app update (independent of query ordering).
+
+    Catalog updates have a version; custom-image updates only expose a boolean
+    on app.query, so notification state is reset once that flag disappears.
+    """
+    name = str(app.get("name") or "").strip()
+    if app.get("upgrade_available"):
+        return f"{name}|catalog|{app.get('latest_version') or 'latest'}"
+    return f"{name}|image"
+
+
+def newly_available_apps(apps: list[dict], seen: set[str]) -> list[dict]:
+    """Only select upgrades that have not been notified for this chat."""
+    return [
+        app for app in apps
+        if str(app.get("name") or "").strip()
+        and app_update_fingerprint(app) not in seen
+    ]
+
+
+def format_app_update_notification(apps: list[dict]) -> str:
+    lines = [f"⬆️ App updates available ({len(apps)})", ""]
+    lines.extend(f"• {update_label(app)}" for app in apps)
+    return "\n".join(lines)[:3900]
+
+
+async def refresh_and_send_app_updates(application: Application) -> None:
+    """Poll TrueNAS app.query independently of TrueNAS's alert subsystem.
+
+    Notifications are saved per Telegram chat in the same persistent state.json
+    as alert deduplication. An API/Telegram error does not mark a notice sent.
+    """
+    if not APP_UPDATE_NOTIFICATIONS or not ALLOWED_CHAT_IDS:
+        return
+    if time.monotonic() < float(
+        application.bot_data.get("app_update_alert_suppress_until", 0.0)
+    ):
+        # TrueNAS may briefly report stale image flags during a bot-driven
+        # upgrade; leave state untouched and retry on the next poll.
+        return
+
+    lock = application.bot_data.setdefault("app_update_check_lock", asyncio.Lock())
+    async with lock:
+        try:
+            apps = await asyncio.to_thread(get_updateable_apps_sync)
+        except Exception:
+            log.exception("Could not poll TrueNAS application updates")
+            return
+
+        current = {app_update_fingerprint(app) for app in apps}
+        state_lock = application.bot_data.setdefault("notification_state_lock", asyncio.Lock())
+        async with state_lock:
+            state = load_state()
+            notified_by_chat = state.get("app_update_notified", {})
+            if not isinstance(notified_by_chat, dict):
+                notified_by_chat = {}
+
+            for chat_id in sorted(ALLOWED_CHAT_IDS):
+                chat_key = str(chat_id)
+                past = notified_by_chat.get(chat_key, [])
+                seen = set(past) if isinstance(past, list) else set()
+                # Clear stale notification IDs so a future recurrence will
+                # generate a new alert, including custom Docker-image updates.
+                seen.intersection_update(current)
+                newly_found = newly_available_apps(apps, seen)
+                if newly_found:
+                    keyboard = InlineKeyboardMarkup([[
+                        InlineKeyboardButton(
+                            "⬆️ Update",
+                            callback_data="alert:updates",
+                        )
+                    ]]) if ALLOW_APP_UPDATES else None
+                    try:
+                        await application.bot.send_message(
+                            chat_id=chat_id,
+                            text=format_app_update_notification(newly_found),
+                            reply_markup=keyboard,
+                        )
+                    except Exception:
+                        log.exception(
+                            "Could not notify chat %s about app updates", chat_id
+                        )
+                    else:
+                        seen.update(app_update_fingerprint(app) for app in newly_found)
+
+                notified_by_chat[chat_key] = sorted(seen)
+
+            state["app_update_notified"] = notified_by_chat
+            save_state(state)
+
+
+async def app_update_safety_poll(application: Application) -> None:
+    """Catch update flags that do not produce a TrueNAS alert.list event."""
+    await asyncio.sleep(5)
+    while True:
+        try:
+            await refresh_and_send_app_updates(application)
+        except Exception:
+            log.exception("Unexpected application-update polling failure")
+        await asyncio.sleep(APP_UPDATE_POLL_SECONDS)
+
+
+# ---------------------------------------------------------------------------
 # Alert state / notification
 # ---------------------------------------------------------------------------
 
@@ -831,6 +944,11 @@ def alert_button(
 
 
 async def send_alert(application: Application, alert: dict) -> None:
+    if APP_UPDATE_NOTIFICATIONS and is_app_update_available_alert(alert):
+        # Direct app.query polling delivers a single actionable notification,
+        # whether or not TrueNAS creates an alert.list entry for the update.
+        # Native alerts remain visible and acknowledgeable via /alerts.
+        return
     if app_update_alert_is_suppressed(application, alert):
         log.info(
             "Suppressing app-update availability alert during/after bot-driven upgrade: %s",
@@ -868,39 +986,41 @@ async def refresh_and_send_alerts(application: Application) -> None:
             log.exception("alert.list failed")
             return
 
-        state = load_state()
-        initialized = bool(state.get("alerts_initialized", False))
-        seen = set(state.get("alert_fingerprints", []))
+        state_lock = application.bot_data.setdefault("notification_state_lock", asyncio.Lock())
+        async with state_lock:
+            state = load_state()
+            initialized = bool(state.get("alerts_initialized", False))
+            seen = set(state.get("alert_fingerprints", []))
 
-        active = [
-            a for a in (alerts or [])
-            if not a.get("dismissed")
-            and alert_level_allowed(str(a.get("level", "INFO")))
-        ]
+            active = [
+                a for a in (alerts or [])
+                if not a.get("dismissed")
+                and alert_level_allowed(str(a.get("level", "INFO")))
+            ]
 
-        if not initialized:
-            state["alerts_initialized"] = True
-            if not ALERT_SEND_EXISTING_ON_START:
-                seen.update(alert_fingerprint(a) for a in active)
-                state["alert_fingerprints"] = list(seen)[-2000:]
-                save_state(state)
-                log.info(
-                    "Alert notifier initialized with %d existing alerts",
-                    len(active),
-                )
-                return
+            if not initialized:
+                state["alerts_initialized"] = True
+                if not ALERT_SEND_EXISTING_ON_START:
+                    seen.update(alert_fingerprint(a) for a in active)
+                    state["alert_fingerprints"] = list(seen)[-2000:]
+                    save_state(state)
+                    log.info(
+                        "Alert notifier initialized with %d existing alerts",
+                        len(active),
+                    )
+                    return
 
-        for alert in active:
-            fp = alert_fingerprint(alert)
-            if alert_was_seen(alert, seen):
-                # Migrate old timestamp-based fingerprints to the stable form.
+            for alert in active:
+                fp = alert_fingerprint(alert)
+                if alert_was_seen(alert, seen):
+                    # Migrate old timestamp-based fingerprints to the stable form.
+                    seen.add(fp)
+                    continue
+                await send_alert(application, alert)
                 seen.add(fp)
-                continue
-            await send_alert(application, alert)
-            seen.add(fp)
 
-        state["alert_fingerprints"] = list(seen)[-2000:]
-        save_state(state)
+            state["alert_fingerprints"] = list(seen)[-2000:]
+            save_state(state)
 
 
 def alert_subscription_worker(application: Application, loop: asyncio.AbstractEventLoop) -> None:
@@ -1486,6 +1606,8 @@ async def post_init(application: Application) -> None:
     ).start()
 
     application.create_task(alert_safety_poll(application))
+    if APP_UPDATE_NOTIFICATIONS:
+        application.create_task(app_update_safety_poll(application))
 
 
 def main() -> None:

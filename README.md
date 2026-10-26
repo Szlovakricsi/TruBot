@@ -10,7 +10,7 @@
 - **`/status`** — Host, IP address, uptime, CPU load/temperature, memory, storage pools, disk temperatures, and UPS status when configured.
 - **`/apps`** — Installed TrueNAS application status.
 - **`/alerts`** — Active TrueNAS alerts with acknowledgement. Application-update alerts show an **⬆️ Update** action beside **✅ Acknowledge**.
-- **Automatic alert notifications** — Event subscription with polling fallback, deduplication, and per-alert acknowledgement. App-update alerts offer a direct shortcut to the one/all updates menu.
+- **Automatic alert notifications** — TrueNAS alert subscription plus polling fallback; application-update notifications are independently checked via `app.query`, with persistent per-chat deduplication and an update shortcut.
 - **`/updates`** — Available application updates, selectable updates, and per-application progress/error messages.
 - **`/restart`** — Restart explicitly allowed applications.
 - **`/version`** — Display the TruBot image version.
@@ -67,7 +67,9 @@ Recommended: use the prebuilt Docker image from GitHub Container Registry rather
 | `ALLOW_APP_UPDATES` | `true` | Enable updates from Telegram |
 | `UPGRADE_SNAPSHOT_HOSTPATHS` | `true` | Ask TrueNAS to snapshot host paths before app upgrade |
 | `ALERT_MIN_LEVEL` | `INFO` | Minimum alert level |
-| `ALERT_POLL_SECONDS` | `60` | Safety poll period; minimum 30 seconds |
+| `ALERT_POLL_SECONDS` | `60` | TrueNAS alert safety poll period; minimum 30 seconds |
+| `APP_UPDATE_NOTIFICATIONS` | `true` | Notify Telegram when TrueNAS flags an application update |
+| `APP_UPDATE_POLL_SECONDS` | `300` | How often to check `app.query` for updates (seconds; minimum 60) |
 | `ALERT_SEND_EXISTING_ON_START` | `false` | Send pre-existing alerts at first startup |
 | `STATE_FILE` | `/data/state.json` | Persistent alert notification state |
 | `TRUBOT_VERSION` | image-defined | Version reported by `/version` |
@@ -83,11 +85,11 @@ Use a **dedicated, least-privilege TrueNAS account**. Read functions need access
 
 ## Versioning and updates
 
-Current version: **v1.3.0** ([VERSION](VERSION)).
+Current version: **v1.4.0** ([VERSION](VERSION)).
 
 GitHub Actions runs tests, builds and publishes multi-architecture Docker images to **GHCR**:
 
-- Every push to `main` publishes `ghcr.io/szlovakricsi/trubot:latest`, `:edge`, and the version tag in `VERSION` (currently `:v1.3.0`) after successful validation and build.
+- Every push to `main` publishes `ghcr.io/szlovakricsi/trubot:latest`, `:edge`, and the version tag in `VERSION` (currently `:v1.4.0`) after successful validation and build.
 - A new version also creates a GitHub Release automatically once its Docker build succeeds.
 - Pushing a version tag, for example `v1.0.0`, also publishes versioned tags such as `:v1.0.0` and `:1.0.0`.
 - TrueNAS can check upstream image changes for custom applications. An available image update appears in TrueNAS Apps; you choose when to install it. Detection depends on TrueNAS polling and a published, accessible GHCR package.
@@ -130,13 +132,22 @@ Battery voltage: 26.8 V
 
 ## Application update notifications
 
-If TrueNAS sends an **application update available** alert, both automatically delivered notifications and `/alerts` show **✅ Acknowledge** and **⬆️ Update** buttons. The update button is hidden when `ALLOW_APP_UPDATES=false`.
+**New in v1.4.0:** TruBot checks TrueNAS `app.query` every **5 minutes** by default. Unlike `alert.list`, `app.query` exposes `image_updates_available` and `upgrade_available` directly. Each newly available application update triggers a Telegram message:
 
-- **Acknowledge** dismisses the alert, without installing updates.
-- **Update** opens a separate Telegram message showing the *current* updateable apps from TrueNAS.
-- Choose **1️⃣ One app** or **♻️ Update all**, then confirm the selection to initiate the existing TrueNAS update flow.
-- The original alert stays visible and is not automatically acknowledged or removed when requesting app updates.
-- Each Telegram update-selection message keeps its own app list, so choices from different conversations do not override one another.
+```text
+⬆️ App updates available (2)
+
+• sonarr: Docker image update
+• radarr: Docker image update
+[⬆️ Update]
+```
+
+- **Update** opens the normal **One app / Update all** confirmation menu. It never starts an upgrade without confirmation. The button is absent if `ALLOW_APP_UPDATES=false`.
+- A new update is announced once per authorized chat; `state.json` remembers which app updates were already announced across restarts. If an app becomes up to date, its notification state clears so a later update is announced again.
+- Existing updates found after enabling the feature are notified on the first scan. Successful manual `/updates` lookups do not suppress notifications.
+- The native TrueNAS "updates are available" `alert.list` notification is suppressed while proactive app notifications are enabled to prevent duplicate Telegram messages. The TrueNAS alert still exists and may be acknowledged through `/alerts`; synthetic Telegram notices do **not** dismiss TrueNAS alerts.
+- **Important:** the 5-minute scan only checks flags already populated by TrueNAS. The TrueNAS image registry check itself normally runs every 24 hours; it can be triggered manually with `midclt -t 600 call app.image.op.check_update`. TruBot does not force expensive registry checks every 5 minutes.
+- This feature can be disabled via `APP_UPDATE_NOTIFICATIONS=false`, restoring the older native TrueNAS-alert behavior.
 
 ## Compatibility
 

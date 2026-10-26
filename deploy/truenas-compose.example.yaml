@@ -22,6 +22,8 @@ services:
       UPGRADE_SNAPSHOT_HOSTPATHS: "true"
       ALERT_MIN_LEVEL: "INFO"
       ALERT_POLL_SECONDS: "60"
+      APP_UPDATE_NOTIFICATIONS: "true"
+      APP_UPDATE_POLL_SECONDS: "300"
       ALERT_SEND_EXISTING_ON_START: "false"
       STATE_FILE: "/data/state.json"
     volumes:
